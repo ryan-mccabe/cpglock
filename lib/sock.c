@@ -291,11 +291,15 @@ sock_connect(const char *sockpath, int tout)
 	}
 	
 	flags = fcntl(sock, F_GETFL, 0);
-	if (flags < 0)
+	if (flags < 0) {
+		close(sock);
 		return -1;
+	}
 
-	if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0)
+	if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
+		close(sock);
 		return -1;
+	}
 
 	ret = connect(sock, (struct sockaddr *) &sun, sizeof(sun));
 	if (ret < 0 && (errno != EINPROGRESS)) {

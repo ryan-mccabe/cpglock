@@ -109,6 +109,9 @@ client_connect_cb(int32_t fd, int32_t revents, void *data)
 		return 0;
 	}
 
+	if (shutdown_pending)
+		return 0;
+
 	do {
 		client_fd = accept(fd, NULL, NULL);
 	} while (client_fd < 0 && errno == EINTR);
@@ -813,16 +816,16 @@ grant_client(struct cpg_lock *l)
 	struct client_item *c;
 	struct cpg_lock_msg m;
 
-	if (local_lockid == (typeof(local_lockid)) ~0) {
-		qb_log(LOG_DEBUG, "local_lockid about to overflow for %s %u:%u\n",
-			m.resource, m.owner_pid, m.owner_tid);
-	}
-
 	memset(&m, 0, sizeof(m));
 	strncpy(m.resource, l->resource, sizeof(m.resource));
 	m.request = MSG_GRANT;
 	m.owner_pid = l->owner_pid;
 	m.owner_tid = l->owner_tid;
+
+	if (local_lockid == (typeof(local_lockid)) ~0) {
+		qb_log(LOG_DEBUG, "local_lockid about to overflow for %s %u:%u\n",
+			m.resource, m.owner_pid, m.owner_tid);
+	}
 
 	l->local_id = ++local_lockid;
 	m.lockid = l->local_id;
@@ -1155,7 +1158,8 @@ find_lock_by_id(struct cpg_lock_msg *m)
 		const struct cpg_lock *l = (const struct cpg_lock *) data;
 
 		if (l && m->lockid == l->local_id) {
-			qb_log(LOG_TRACE, "LOCK %lu -> %s\n", m->lockid, m->resource);
+			qb_log(LOG_TRACE, "LOCK ID %lu -> LOCK NAME %s\n",
+				m->lockid, m->resource);
 			strncpy(m->resource, l->resource, sizeof(m->resource));
 			m->owner_nodeid = l->owner_nodeid;
 			m->owner_pid = l->owner_pid;
@@ -1445,35 +1449,114 @@ cpg_init(void)
 	return 0;
 }
 
+static uint32_t drop_all_locks(void) {
+	qb_map_iter_t *iter;
+	uint32_t dropped_locks = 0;
+
+	iter = qb_map_iter_create(locks);
+	if (iter) {
+		void *data;
+
+		while (qb_map_iter_next(iter, &data)) {
+			struct cpg_lock *l = (struct cpg_lock *) data;
+
+			qb_log(LOG_TRACE,
+				"CLEAR STATE: Dropping lock %s [%u:%u:%u]\n",
+				l->resource, l->owner_nodeid, l->owner_pid, l->owner_tid);
+			qb_map_rm(locks, l->resource);
+			free(l);
+			++dropped_locks;
+		}
+	}
+
+	qb_log(LOG_TRACE, "CLEAR STATE: Dropped %u locks\n",
+		dropped_locks);
+
+	return dropped_locks;
+}
+
+static uint32_t drop_all_requests(void) {
+	uint32_t dropped_reqs = 0;
+	struct request_item *r, *n;
+
+	qb_list_for_each_entry_safe(r, n, &requests, list) {
+		if (r->l.owner_nodeid == my_node_id) {
+			nak_client(r);
+			qb_log(LOG_TRACE, "CLEAR STATE: sent NAK %s [%u:%u:%u]\n",
+				r->l.resource, r->l.owner_nodeid,
+				r->l.owner_pid, r->l.owner_tid);
+		}
+		qb_log(LOG_TRACE, "CLEAR STATE: Dropping request %s [%u:%u:%u]\n",
+			r->l.resource, r->l.owner_nodeid,
+			r->l.owner_pid, r->l.owner_tid);
+		qb_list_del(&r->list);
+		free(r);
+		++dropped_reqs;
+	}
+
+	qb_log(LOG_TRACE, "CLEAR STATE: Dropped %u requests\n",
+		dropped_reqs);
+
+	return dropped_reqs;
+}
+
+static uint32_t drop_all_clients(void) {
+	struct client_item *c, *n;
+	uint32_t dropped_clients = 0;
+
+	qb_list_for_each_entry_safe(c, n, &clients, list) {
+		qb_loop_poll_del(main_loop, c->fd);
+		qb_list_del(&c->list);
+		close(c->fd);
+		free(c);
+		++dropped_clients;
+	}
+
+	qb_log(LOG_TRACE, "CLEAR STATE: Dropped %u clients\n",
+		dropped_clients);
+
+	return dropped_clients;
+}
+
+static uint32_t drop_all_saved_msgs(void) {
+	struct msg_item *m, *n;
+	uint32_t dropped_msgs = 0;
+
+	qb_list_for_each_entry_safe(m, n, &messages, list) {
+		qb_list_del(&m->list);
+		free(m);
+		++dropped_msgs;
+	}
+
+	qb_log(LOG_TRACE, "CLEAR STATE: Dropped %u saved messages\n",
+		dropped_msgs);
+
+	return dropped_msgs;
+}
+
+static uint32_t drop_all_members(void) {
+	struct member_item *m, *n;
+	uint32_t dropped_members = 0;
+
+	qb_list_for_each_entry_safe(m, n, &group_members, list) {
+		qb_list_del(&m->list);
+		free(m);
+		++dropped_members;
+	}
+
+	qb_log(LOG_TRACE, "CLEAR STATE: Dropped %u group members\n",
+		dropped_members);
+
+	return dropped_members;
+}
+
 #if 0
 static void
 clear_local_state(void)
 {
-	struct request_item *cur_req = NULL;
-	struct lock_node *cur_lock = NULL;
+	drop_all_locks();
+	drop_all_requests();
 
-	while ((cur_lock = locks) != NULL) {
-		qb_log(LOG_TRACE,
-			"CLEAR STATE: Dropping lock %s [%d:%d]\n",
-			cur_lock->l.resource,
-			cur_lock->l.owner_nodeid, cur_lock->l.owner_pid);
-		list_remove(&locks, cur_lock);
-		free(cur_lock);
-	}
-
-	while ((cur_req = requests) != NULL) {
-		if (cur_req->l.owner_nodeid == my_node_id) {
-			nak_client(cur_req);
-			qb_log(LOG_TRACE, "CLEAR STATE: sent NAK %s [%d:%d:%d]\n",
-				cur_req->l.resource, cur_req->l.owner_nodeid,
-				cur_req->l.owner_pid, cur_req->l.owner_tid);
-		}
-		qb_log(LOG_TRACE, "CLEAR STATE: Dropping request %s [%d:%d:%d]\n",
-			cur_req->l.resource, cur_req->l.owner_nodeid,
-			cur_req->l.owner_pid, cur_req->l.owner_tid);
-		list_remove(&requests, cur_req);
-		free(cur_req);
-	}
 }
 #endif
 
@@ -1603,7 +1686,7 @@ main(int argc, char **argv)
 	qb_loop_poll_add(main_loop, QB_LOOP_MED, fd,
 		POLLIN | POLLERR | POLLHUP | POLLNVAL, NULL, client_connect_cb);
 
-    /* XXX - using trie because hash and skiplist seem to be broken */
+	/* XXX - using trie because hash and skiplist seem to be broken */
 	locks = qb_trie_create();
 	if (!locks) {
 		qb_log(LOG_ERR, "Unable to create lock map\n");
@@ -1614,6 +1697,12 @@ main(int argc, char **argv)
 
 	if (!shutdown_pending)
 		qb_loop_run(main_loop);
+
+	drop_all_locks();
+	drop_all_requests();
+	drop_all_clients();
+	drop_all_saved_msgs();
+	drop_all_members();
 
 	qb_map_destroy(locks);
 
