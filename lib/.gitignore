@@ -1,0 +1,6 @@
+*.lo
+*.la
+*.o
+libcpglock.pc
+.libs
+.deps

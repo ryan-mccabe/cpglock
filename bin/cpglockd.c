@@ -35,6 +35,7 @@
 #include "sock.h"
 #include "cpglock.h"
 #include "cpglock-internal.h"
+#include "cpglock_util.h"
 
 struct request_item {
 	struct qb_list_head list;
@@ -104,7 +105,7 @@ client_connect_cb(int32_t fd, int32_t revents, void *data)
 {
 	int client_fd;
 
-	if (revents & (POLLERR | POLLHUP | POLLNVAL)) {
+	if (revents & (POLLERR | POLLNVAL)) {
 		qb_log(LOG_ERR, "Error on listen socket: revents %d\n", revents);
 		return 0;
 	}
@@ -132,7 +133,7 @@ client_activity_cb(int32_t fd, int32_t revents, void *data)
 	struct cpg_lock_msg m;
 	struct client_item *client = (struct client_item *) data;
 
-	if (revents & (POLLERR | POLLHUP | POLLNVAL)) {
+	if (revents & (POLLERR | POLLNVAL)) {
 		qb_log(LOG_DEBUG, "Closing client fd %d pid %u: revents %d\n",
 			client->fd, client->pid, revents);
 
@@ -140,7 +141,7 @@ client_activity_cb(int32_t fd, int32_t revents, void *data)
 		return 0;
 	}
 
-	if (read_retry(fd, &m, sizeof(m), NULL) < 0) {
+	if (read_timeout(fd, &m, sizeof(m), -1) < 0) {
 		qb_log(LOG_DEBUG, "Closing client fd %d pid %u: %d\n",
 			client->fd, client->pid, errno);
 
@@ -186,7 +187,7 @@ client_activity_cb(int32_t fd, int32_t revents, void *data)
 }
 
 static int32_t cpg_event_cb(int32_t fd, int32_t revents, void *data) {
-	if (revents & (POLLERR | POLLHUP | POLLNVAL)) {
+	if (revents & (POLLERR | POLLNVAL)) {
 		qb_log(LOG_ERR, "Error on cpg fd: revents %d\n", revents);
 		goto out_err;
 	}
@@ -408,7 +409,7 @@ old_msg(struct cpg_lock_msg *m)
 	struct msg_item *n;
 	int ret = -1;
 
-	n = do_alloc(sizeof(*n));
+	n = wait_calloc(sizeof(*n));
 	do {
 		ret = clock_gettime(CLOCK_MONOTONIC, &n->msg_time);
 	} while (ret == -1 && errno == EINTR);
@@ -430,14 +431,12 @@ insert_client(int fd)
 {
 	struct client_item *n = NULL;
 
-	n = do_alloc(sizeof(*n));
+	n = wait_calloc(sizeof(*n));
 	n->fd = fd;
 	qb_list_init(&n->list);
 
 	qb_list_add_tail(&n->list, &clients);
-
-	qb_loop_poll_add(main_loop, QB_LOOP_MED, fd,
-		POLLIN | POLLERR | POLLHUP | POLLNVAL, n, client_activity_cb);
+	qb_loop_poll_add(main_loop, QB_LOOP_MED, fd, POLLIN, n, client_activity_cb);
 }
 
 static void
@@ -557,8 +556,8 @@ grant_next(struct cpg_lock_msg *m)
 			/* don't send dup grants */
 			r->l.state = LOCK_HELD;
 			send_grant(r);
+			return 1;
 		}
-		return 1;
 	}
 
 	return 0;
@@ -844,7 +843,7 @@ grant_client(struct cpg_lock *l)
 		return -1;
 	}
 
-	if (write_retry(c->fd, &m, sizeof(m), NULL) < 0) {
+	if (write_timeout(c->fd, &m, sizeof(m), -1) < 0) {
 		/* no client anymore; drop and send to next guy
 		** This should be handled by our main loop
 		** qb_log(LOG_DEBUG, "Failed to notify client!\n");
@@ -881,7 +880,7 @@ nak_client(struct request_item *r)
 		return -1;
 	}
 
-	if (write_retry(c->fd, &m, sizeof(m), NULL) < 0) {
+	if (write_timeout(c->fd, &m, sizeof(m), -1) < 0) {
 		/* no client anymore; drop and send to next guy XXX
 		** This should be handled by our main loop
 		** qb_log(LOG_DEBUG, "Failed to notify client!\n");
@@ -891,13 +890,16 @@ nak_client(struct request_item *r)
 	return 0;
 }
 
-static int
+static void
 queue_request(struct cpg_lock_msg *m)
 {
 	struct request_item *r;
 	int ret;
 
-	r = do_alloc(sizeof(*r));
+	qb_log(LOG_TRACE, "LOCK %s: queue for %u:%u:%u\n", m->resource,
+		m->owner_nodeid, m->owner_pid, m->owner_tid);
+
+	r = wait_calloc(sizeof(*r));
 	do {
 		ret = clock_gettime(CLOCK_MONOTONIC, &r->req_time);
 	} while (ret == -1 && errno == EINTR);
@@ -909,8 +911,6 @@ queue_request(struct cpg_lock_msg *m)
 	r->l.state = LOCK_PENDING;
 	qb_list_init(&r->list);
 	qb_list_add_tail(&r->list, &requests);
-
-	return 0;
 }
 
 
@@ -923,9 +923,6 @@ process_lock(struct cpg_lock_msg *m)
 	if (!joined)
 		return 0;
 
-	qb_log(LOG_TRACE, "LOCK %s: queue for %u:%u:%u\n", m->resource,
-		m->owner_nodeid, m->owner_pid, m->owner_tid);
-
 	queue_request(m);
 
 	l = qb_map_get(locks, m->resource);
@@ -936,11 +933,10 @@ process_lock(struct cpg_lock_msg *m)
 			if (l->state == LOCK_FREE) {
 				/* Set local state to PENDING to avoid double-grants */
 				l->state = LOCK_PENDING;
-				grant_next(m);
+				if (grant_next(m) == 0)
+					l->state = LOCK_FREE;
 			} else {
 				/* state is PENDING or HELD */
-				qb_log(LOG_TRACE, "lock state for %s[%s] is %s\n",
-					m->resource, l->resource, ls2str(l->state));
 				if (m->flags & FL_TRY) {
 					/* nack to client if needed */
 					send_nak(m);
@@ -949,7 +945,7 @@ process_lock(struct cpg_lock_msg *m)
 		}
 	} else {
 		/* New lock */
-		l = do_alloc(sizeof(*l));
+		l = wait_calloc(sizeof(*l));
 		strncpy(l->resource, m->resource, sizeof(l->resource));
 		l->state = LOCK_FREE;
 
@@ -959,8 +955,10 @@ process_lock(struct cpg_lock_msg *m)
 		if (oldest->nodeid == my_node_id) {
 			l->state = LOCK_PENDING;
 			/* immediately grant */
-			if (grant_next(m) == 0)
+			if (grant_next(m) == 0) {
+				/* Should not happen */
 				l->state = LOCK_FREE;
+			}
 		}
 	}
 
@@ -1040,7 +1038,7 @@ process_grant(struct cpg_lock_msg *m, uint32_t nodeid)
 		}
 	} else {
 		/* Record the lock state since we now know it */
-		l = do_alloc(sizeof(*l));
+		l = wait_calloc(sizeof(*l));
 		strncpy(l->resource, m->resource, sizeof(l->resource));
 		l->state = LOCK_HELD;
 		l->owner_nodeid = m->owner_nodeid;
@@ -1203,7 +1201,7 @@ process_join(struct cpg_lock_msg *m, uint32_t nodeid, uint32_t pid)
 	} else
 		qb_log(LOG_TRACE, "JOIN: node %u.%u\n", nodeid, pid);
 
-	n = do_alloc(sizeof(*n));
+	n = wait_calloc(sizeof(*n));
 	n->nodeid = nodeid;
 	n->pid = pid;
 	qb_list_init(&n->list);
@@ -1297,7 +1295,7 @@ cpg_config_change(	cpg_handle_t h,
 				if (members[x].nodeid == my_node_id)
 					continue;
 
-				n = do_alloc(sizeof(*n));
+				n = wait_calloc(sizeof(*n));
 				n->nodeid = members[x].nodeid;
 				n->pid = members[x].pid;
 				qb_list_init(&n->list);

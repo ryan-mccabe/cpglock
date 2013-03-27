@@ -1,0 +1,5 @@
+cpglockd
+*.o
+Makefile
+Makefile.in
+.deps

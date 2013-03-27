@@ -1,19 +1,18 @@
 /*
 ** Copyright (C) 2012-2013 Red Hat, Inc. All rights reserved.
 **
-** This program is free software; you can redistribute it and/or modify
-** it under the terms of the GNU General Public License as published by
-** the Free Software Foundation; either version 2 of the License, or
+** This program is free software: you can redistribute it and/or modify
+** it under the terms of the GNU Lesser General Public License as published by
+** the Free Software Foundation, either version 2.1 of the License, or
 ** (at your option) any later version.
 **
 ** This program is distributed in the hope that it will be useful,
 ** but WITHOUT ANY WARRANTY; without even the implied warranty of
 ** MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-** GNU General Public License for more details.
+** GNU Lesser General Public License for more details.
 **
-** You should have received a copy of the GNU General Public License
-** along with this program; if not, write to the Free Software
-** Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+** You should have received a copy of the GNU Lesser General Public License
+** along with This program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include <unistd.h>
@@ -29,7 +28,7 @@
 
 #include "cpglock.h"
 #include "cpglock-internal.h"
-#include "sock.h"
+#include "cpglock_util.h"
 
 struct pending_node {
 	struct qb_list_head list;
@@ -74,7 +73,7 @@ check_pending(	struct qb_list_head *pending,
 static void
 add_pending(struct qb_list_head *pending, struct cpg_lock_msg *m)
 {
-	struct pending_node *p = do_alloc(sizeof(*p));
+	struct pending_node *p = wait_calloc(sizeof(*p));
 
 	memcpy(&p->m, m, sizeof(p->m));
 	qb_list_init(&p->list);
@@ -89,11 +88,11 @@ cpg_lock_init(void **handle)
 	struct cpg_lock_handle *h;
 	int esv;
 
-	h = do_alloc(sizeof (*h));
+	h = wait_calloc(sizeof (*h));
 	if (!h)
 		return -1;
 
-	h->fd = sock_connect(CPG_LOCKD_SOCK, 3);
+	h->fd = sock_connect(CPG_LOCKD_SOCK, 3000);
 	if (h->fd < 0) {
 		esv = errno;
 		free(h);
@@ -118,7 +117,6 @@ cpg_lock(	void *handle,
 {
 	struct cpg_lock_handle *h = handle;
 	struct cpg_lock_msg l, r;
-	struct timeval tv;
 	int ret = -1;
 
 	if (!h) {
@@ -148,7 +146,7 @@ cpg_lock(	void *handle,
 	l.request = MSG_LOCK;
 	l.flags = (uint32_t) flags;
 	
-	if (write_retry(h->fd, &l, sizeof(l), NULL) < 0)
+	if (write_timeout(h->fd, &l, sizeof(l), -1) < 0)
 		goto out;
 
 	/* Thread concurrency: in case multiple threads wake up
@@ -157,10 +155,7 @@ cpg_lock(	void *handle,
 		if (check_pending(&h->pending, &l, &r) == 0)
 			break;
 
-		tv.tv_sec = 0;
-		tv.tv_usec = random() & 16383;
-
-		if (read_retry(h->fd, &r, sizeof(r), &tv) < 0) {
+		if (read_timeout(h->fd, &r, sizeof(r), random() & 0xf) < 0) {
 			if (errno == ETIMEDOUT) {
 				pthread_mutex_unlock(&h->mutex);
 				usleep(random() & 16383);
@@ -251,7 +246,7 @@ cpg_unlock(void *handle, struct cpg_lock *lock)
 	l.owner_tid = 0;
 	lock->state = LOCK_FREE;
 	
-	ret = write_retry(h->fd, &l, sizeof(l), NULL);
+	ret = write_timeout(h->fd, &l, sizeof(l), -1);
 out:
 	return ret;
 }
@@ -264,19 +259,21 @@ cpg_lock_dump(FILE *fp)
 	int fd;
 	char c;
 
-	fd = sock_connect(CPG_LOCKD_SOCK, 3);
+	fd = sock_connect(CPG_LOCKD_SOCK, 3000);
 	if (fd < 0)
 		return -1;
 
 	memset(&l, 0, sizeof(l));
 	l.request = MSG_DUMP;
 	
-	if (write_retry(fd, &l, sizeof(l), NULL) < 0) {
+	if (write_timeout(fd, &l, sizeof(l), -1) < 0) {
+		int saved_errno = errno;
 		close(fd);
+		errno = saved_errno;
 		return -1;
 	}
 
-	while (read_retry(fd, &c, 1, NULL) == 1)
+	while (read_timeout(fd, &c, 1, -1) == 1)
 		fprintf(fp, "%c", c);
 	
 	close(fd);
