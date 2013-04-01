@@ -21,7 +21,6 @@
 #include <time.h>
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
 #include <errno.h>
 #include <poll.h>
 #include <fcntl.h>
@@ -143,15 +142,14 @@ int sock_connect(const char *path, int timeout_ms) {
 		return -1;
 	}
 
-	sock = socket(PF_LOCAL, SOCK_STREAM, 0);
-	if (sock < 0)
-		return -1;
-		
 	if (strlen(path) >= sizeof(sun.sun_path)) {
-		close(sock);
 		errno = ENAMETOOLONG;
 		return -1;
 	}
+
+	sock = socket(PF_LOCAL, SOCK_STREAM, 0);
+	if (sock < 0)
+		return -1;
 
 	sun.sun_family = PF_LOCAL;
 	strcpy(sun.sun_path, path);
