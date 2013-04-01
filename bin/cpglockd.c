@@ -215,7 +215,7 @@ flag_shutdown(int32_t sig, void *data)
 	if (!qb_list_empty(&clients)) {
 		qb_log(LOG_INFO,
 			"Clients are connected to cpglockd. Refusing to shutdown.\n");
-		return -1;
+		return 0;
 	}
 
 	qb_log(LOG_INFO, "Caught signal %d. Shutting Down.\n", sig);
