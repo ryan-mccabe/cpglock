@@ -1668,10 +1668,9 @@ main(int argc, char **argv)
 	}
 
 	qb_loop_poll_add(main_loop, QB_LOOP_HIGH, cpgfd,
-		POLLIN | POLLERR | POLLHUP | POLLNVAL, NULL, cpg_event_cb);
-
+		POLLIN, NULL, cpg_event_cb);
 	qb_loop_poll_add(main_loop, QB_LOOP_MED, fd,
-		POLLIN | POLLERR | POLLHUP | POLLNVAL, NULL, client_connect_cb);
+		POLLIN, NULL, client_connect_cb);
 
 	/* XXX - using trie because hash and skiplist seem to be broken */
 	locks = qb_trie_create();
