@@ -1011,12 +1011,14 @@ process_grant(struct cpg_lock_msg *m, uint32_t nodeid)
 		/* granted lock */
 		if (l->owner_nodeid == my_node_id) {
 			if (grant_client(l) != 0) {
-				/* Grant to a nonexistent PID can
-				   happen because we may have a pending
-				   request after a fd was closed.
-				   since we process on delivery, we
-				   now simply make an unlock request
-				   and move on */
+				/*
+				** A Grant to a nonexistent PID can
+				** happen because we may have a pending
+				** request after a fd was closed.
+				** since we process on delivery, we
+				** now simply make an unlock request
+				** and move on
+				*/
 				purge_requests(my_node_id, l->owner_pid);
 				if (grant_next(m) == 0)
 					send_unlock(m);
@@ -1308,14 +1310,11 @@ cpg_config_change(	cpg_handle_t h,
 		total_members = memberlen;
 	}
 
-#if 0
-	qb_log(LOG_TRACE, "members %d now, %d joined, %d left\n",
-		memberlen, joinlen, leftlen);
-#endif
-
-	/* process join on receipt of JOIN message rather than here
-	   since ordered delivery is agreed, this prevents >1 member from
-	   believing it is the oldest host */
+	/*
+	** process join on receipt of JOIN message rather than here
+	** since ordered delivery is agreed, this prevents >1 member from
+	** believing it is the oldest host
+	*/
 
 	for (x = 0; x < leftlen; x++) {
 		qb_list_for_each_entry(n, &group_members, list) {
@@ -1547,16 +1546,6 @@ static uint32_t drop_all_members(void) {
 
 	return dropped_members;
 }
-
-#if 0
-static void
-clear_local_state(void)
-{
-	drop_all_locks();
-	drop_all_requests();
-
-}
-#endif
 
 static int parse_opts(int argc, char **argv) {
 	int opt;

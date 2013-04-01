@@ -14,7 +14,7 @@
 
   You should have received a copy of the GNU General Public License
   along with this program; see the file COPYING.  If not, write to the
-  Free Software Foundation, Inc.,  675 Mass Ave, Cambridge, 
+  Free Software Foundation, Inc.,  675 Mass Ave, Cambridge,
   MA 02139, USA.
 */
 
@@ -43,7 +43,7 @@ sock_listen(const char *sockpath)
 	sock = socket(PF_LOCAL, SOCK_STREAM, 0);
 	if (sock < 0)
 		goto fail;
-		
+
 	su.sun_family = PF_LOCAL;
 	ret = snprintf(su.sun_path, sizeof(su.sun_path), "%s", sockpath);
 	if (ret < 0 || (size_t) ret >= sizeof(su.sun_path)) {
