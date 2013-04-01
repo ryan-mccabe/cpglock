@@ -1,5 +1,7 @@
 cpglockd
+cpglockdump
 *.o
 Makefile
 Makefile.in
+.libs
 .deps

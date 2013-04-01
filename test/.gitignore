@@ -1,4 +1,12 @@
 *.o
+.libs
 .deps
 Makefile
 Makefile.in
+lockstress
+locktest
+many
+many2
+thread
+thread2
+try
