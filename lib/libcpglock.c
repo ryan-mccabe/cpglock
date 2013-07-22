@@ -310,6 +310,7 @@ cpg_lock_fin(void *handle)
 		free(p);
 	}
 
+	pthread_mutex_unlock(&h->mutex);
 	pthread_mutex_destroy(&h->mutex);
 	free(h);
 	return 0;
