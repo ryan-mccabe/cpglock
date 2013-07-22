@@ -297,6 +297,7 @@ cpg_lock_fin(void *handle)
 	pthread_mutex_lock(&h->mutex);
 
 	if (h->pid != getpid()) {
+		pthread_mutex_unlock(&h->mutex);
 		errno = EBADF;
 		return -1;
 	}
